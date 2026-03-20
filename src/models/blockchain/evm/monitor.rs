@@ -39,6 +39,14 @@ pub struct MatchParamsMap {
 
 	/// Raw function/event signature as bytes
 	pub hex_signature: Option<String>,
+
+	/// Address that made this call (set for internal call matches, None for top-level)
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub caller: Option<String>,
+
+	/// Address that was called (set for internal call matches, None for top-level)
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub target: Option<String>,
 }
 
 /// Single decoded parameter from a function or event
@@ -187,6 +195,8 @@ mod tests {
 				},
 			]),
 			hex_signature: Some("0xa9059cbb".to_string()),
+			caller: None,
+			target: None,
 		};
 
 		let monitor_match = MonitorMatch {
@@ -264,6 +274,8 @@ mod tests {
 					},
 				]),
 				hex_signature: Some("0xa9059cbb".to_string()),
+				caller: None,
+				target: None,
 			}]),
 			events: Some(vec![MatchParamsMap {
 				signature: "Transfer(address,address,uint256)".to_string(),
@@ -291,6 +303,8 @@ mod tests {
 					"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 						.to_string(),
 				),
+				caller: None,
+				target: None,
 			}]),
 		};
 

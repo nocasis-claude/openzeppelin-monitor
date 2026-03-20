@@ -781,6 +781,8 @@ async fn test_handle_match_with_key_collision() -> Result<(), Box<FilterError>> 
 					},
 				]),
 				hex_signature: Some("0xdeadbeef".to_string()),
+				caller: None,
+				target: None,
 			}]),
 			events: None,
 		}),

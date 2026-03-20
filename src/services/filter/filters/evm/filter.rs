@@ -328,6 +328,8 @@ impl<T> EVMBlockFilter<T> {
 															"0x{}",
 															hex::encode(function.selector())
 														)),
+														caller: None,
+														target: None,
 													});
 												}
 												break;
@@ -356,6 +358,8 @@ impl<T> EVMBlockFilter<T> {
 												hex_signature: Some(hex::encode(
 													function.selector(),
 												)),
+												caller: None,
+												target: None,
 											});
 										}
 										break;
@@ -529,6 +533,8 @@ impl<T> EVMBlockFilter<T> {
 												"0x{}",
 												hex::encode(function.selector())
 											)),
+											caller: Some(h160_to_string(trace.from)),
+											target: Some(to_str.clone()),
 										});
 									}
 									break;
@@ -804,6 +810,8 @@ impl<T> EVMBlockFilter<T> {
 			),
 			args: Some(decoded_params),
 			hex_signature: Some(format!("0x{}", hex::encode(event.selector()))),
+			caller: None,
+			target: None,
 		})
 	}
 
