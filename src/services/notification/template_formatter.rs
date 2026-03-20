@@ -86,6 +86,16 @@ pub fn build_match_reasons(variables: &HashMap<String, String>, prefix: &str) ->
 			match_reasons.push_str(&format!("\n*Reason {}*\n", reason_number + 1));
 			match_reasons.push_str(&format!("\n*Signature:* `{}`\n", signature));
 
+			// Show caller/target for internal call matches
+			let caller_key = format!("{}.{}.caller", prefix, index);
+			let target_key = format!("{}.{}.target", prefix, index);
+			if let Some(caller) = variables.get(&caller_key) {
+				match_reasons.push_str(&format!("\n*Caller:* `{}`", caller));
+			}
+			if let Some(target) = variables.get(&target_key) {
+				match_reasons.push_str(&format!("\n*Target:* `{}`", target));
+			}
+
 			match_reasons.push_str("\n*Params:*\n");
 
 			let mut params = Vec::new();
