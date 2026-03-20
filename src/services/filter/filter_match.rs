@@ -87,7 +87,7 @@ pub async fn handle_match<T: TriggerExecutionServiceTrait>(
 					"args": {}
 				});
 
-				// Add function arguments if present
+				// Add function arguments + caller/target if present
 				if let Some(args) = &evm_monitor_match.matched_on_args {
 					if let Some(func_args) = &args.functions {
 						for func_arg in func_args {
@@ -97,6 +97,13 @@ pub async fn handle_match<T: TriggerExecutionServiceTrait>(
 									for arg in arg_entries {
 										args_obj.insert(arg.name.clone(), json!(arg.value.clone()));
 									}
+								}
+								// Include caller/target for internal call matches
+								if let Some(caller) = &func_arg.caller {
+									function_data["caller"] = json!(caller);
+								}
+								if let Some(target) = &func_arg.target {
+									function_data["target"] = json!(target);
 								}
 							}
 						}
