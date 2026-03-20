@@ -1519,6 +1519,26 @@ async fn test_internal_function_matching() -> Result<(), Box<FilterError>> {
 		// Verify hex_signature is present
 		assert!(mint_args.hex_signature.is_some());
 		assert_eq!(mint_args.hex_signature.as_ref().unwrap(), "0x40c10f19");
+
+		// Verify caller and target are set for internal call matches
+		assert!(
+			mint_args.caller.is_some(),
+			"caller should be set for internal call match"
+		);
+		assert_eq!(
+			mint_args.caller.as_ref().unwrap().to_lowercase(),
+			"0x1111111111111111111111111111111111111111",
+			"caller should be the contract that called mint()"
+		);
+		assert!(
+			mint_args.target.is_some(),
+			"target should be set for internal call match"
+		);
+		assert_eq!(
+			mint_args.target.as_ref().unwrap().to_lowercase(),
+			"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+			"target should be the monitored address (USDC)"
+		);
 	}
 
 	Ok(())
