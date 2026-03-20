@@ -74,8 +74,8 @@ fn make_monitor_with_functions(mut monitor: Monitor, include_expression: bool) -
 			Some("amount >= 2240".to_string())
 		} else {
 			None
-			internal: false,
 		},
+		internal: false,
 	}];
 	monitor
 }

@@ -6,6 +6,8 @@
 use alloy::primitives::Uint;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use openzeppelin_monitor::{
 	models::{
@@ -83,8 +85,8 @@ fn make_monitor_with_functions(mut monitor: Monitor, include_expression: bool) -
 			Some("value > 0".to_string())
 		} else {
 			None
-			internal: false,
 		},
+		internal: false,
 	});
 	monitor
 }
@@ -1295,6 +1297,384 @@ async fn test_filter_block_with_tuples_expression_equality() -> Result<(), Box<F
 		}
 		_ => panic!("Expected EVM match"),
 	}
+
+	Ok(())
+}
+
+// ============================================================================
+// Internal call matching tests
+// ============================================================================
+
+/// Helper: builds a monitor with a single `internal: true` function condition for mint(address,uint256).
+/// Uses the USDC address from the standard fixture as the monitored address.
+fn make_monitor_with_internal_mint(
+	monitor: &Monitor,
+	include_expression: bool,
+) -> Monitor {
+	let mut m = monitor.clone();
+	m.match_conditions.events = vec![];
+	m.match_conditions.transactions = vec![];
+	m.match_conditions.functions = vec![FunctionCondition {
+		signature: "mint(address,uint256)".to_string(),
+		expression: if include_expression {
+			Some("_amount > 1000".to_string())
+		} else {
+			None
+		},
+		internal: true,
+	}];
+	m
+}
+
+/// Build a CallTrace JSON value representing a 3-deep call tree where
+/// a mint(address,uint256) call to the USDC address occurs at depth 3.
+///
+/// Tree shape:
+///   root (CALL from sender -> USDC with approve calldata)
+///     -> depth1 (CALL from USDC -> intermediary)
+///       -> depth2 (CALL from intermediary -> USDC  with mint calldata)
+fn build_mint_trace_json() -> serde_json::Value {
+	// mint(address,uint256) ABI-encoded calldata
+	// selector 0x40c10f19, _to = 0xf423...b635, _amount = 5000000
+	let mint_input = "0x40c10f19\
+		000000000000000000000000f423d9c1ffeb6386639d024f3b241dab2331b635\
+		00000000000000000000000000000000000000000000000000000000004c4b40";
+
+	json!({
+		"type": "CALL",
+		"from": "0x58b704065b7aff3ed351052f8560019e05925023",
+		"to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+		"gas": "0x30000",
+		"gasUsed": "0x10000",
+		"input": "0x095ea7b3000000000000000000000000f423d9c1ffeb6386639d024f3b241dab2331b635ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		"output": "0x0000000000000000000000000000000000000000000000000000000000000001",
+		"calls": [
+			{
+				"type": "CALL",
+				"from": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+				"to": "0x1111111111111111111111111111111111111111",
+				"gas": "0x20000",
+				"gasUsed": "0x8000",
+				"input": "0xdeadbeef",
+				"output": "0x",
+				"calls": [
+					{
+						"type": "CALL",
+						"from": "0x1111111111111111111111111111111111111111",
+						"to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+						"gas": "0x10000",
+						"gasUsed": "0x4000",
+						"input": mint_input,
+						"output": "0x0000000000000000000000000000000000000000000000000000000000000001"
+					}
+				]
+			}
+		]
+	})
+}
+
+/// Creates a mock transport that dispatches on method name.
+/// Handles eth_getLogs (empty), and optionally debug_traceTransaction (returns provided trace).
+/// Tracks whether debug_traceTransaction was called via the `trace_called` flag.
+fn setup_mock_transport_for_internal_calls(
+	trace_json: Option<serde_json::Value>,
+	trace_called: Arc<AtomicBool>,
+) -> MockEVMTransportClient {
+	let mut mock_transport = MockEVMTransportClient::new();
+
+	mock_transport
+		.expect_send_raw_request()
+		.returning(move |method, _params| {
+			match method {
+				"net_version" => Ok(json!({"result": "1"})),
+				"eth_getLogs" => Ok(json!({"result": []})),
+				"debug_traceTransaction" => {
+					trace_called.store(true, Ordering::SeqCst);
+					match &trace_json {
+						Some(trace) => Ok(json!({"result": trace})),
+						None => Err(TransportError::http(
+							reqwest::StatusCode::METHOD_NOT_ALLOWED,
+							"random.url".to_string(),
+							"debug_traceTransaction not expected".to_string(),
+							None,
+							None,
+						)),
+					}
+				}
+				_ => Err(TransportError::http(
+					reqwest::StatusCode::METHOD_NOT_ALLOWED,
+					"random.url".to_string(),
+					format!("Unexpected method: {}", method),
+					None,
+					None,
+				)),
+			}
+		});
+
+	mock_transport
+}
+
+#[tokio::test]
+async fn test_internal_function_matching() -> Result<(), Box<FilterError>> {
+	let test_data = TestDataBuilder::new("evm").build();
+	let filter_service = FilterService::new();
+
+	let trace_called = Arc::new(AtomicBool::new(false));
+	let mock_transport = setup_mock_transport_for_internal_calls(
+		Some(build_mint_trace_json()),
+		trace_called.clone(),
+	);
+	let client = EvmClient::new_with_transport(mock_transport);
+
+	let monitor = make_monitor_with_internal_mint(&test_data.monitor, false);
+
+	// Use the monitor's embedded ABI (which includes mint) rather than the
+	// standalone contract_spec.json (which only has transfer/increment)
+	let usdc_address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+	let contract_spec = test_data
+		.monitor
+		.addresses
+		.iter()
+		.find(|a| a.address.to_lowercase() == usdc_address)
+		.expect("USDC address in monitor")
+		.contract_spec
+		.clone()
+		.expect("USDC ABI present");
+	let contract_with_spec: (String, ContractSpec) = (
+		usdc_address.to_string(),
+		contract_spec,
+	);
+
+	// Use block[0] which has a TX to the USDC address
+	let matches = filter_service
+		.filter_block(
+			&client,
+			&test_data.network,
+			&test_data.blocks[0],
+			&[monitor],
+			Some(&[contract_with_spec]),
+		)
+		.await?;
+
+	// debug_traceTransaction should have been called
+	assert!(
+		trace_called.load(Ordering::SeqCst),
+		"debug_traceTransaction should be called for internal: true conditions"
+	);
+
+	assert!(!matches.is_empty(), "Should have found internal function match");
+
+	// Find the match that contains the mint function
+	let mint_match = matches.iter().find(|m| {
+		if let MonitorMatch::EVM(evm) = m {
+			evm.matched_on
+				.functions
+				.iter()
+				.any(|f| f.signature.contains("mint"))
+		} else {
+			false
+		}
+	});
+
+	assert!(mint_match.is_some(), "Should have found a mint function match");
+
+	if let MonitorMatch::EVM(evm_match) = mint_match.unwrap() {
+		// Verify the matched function condition
+		let mint_fn = evm_match
+			.matched_on
+			.functions
+			.iter()
+			.find(|f| f.signature.contains("mint"))
+			.unwrap();
+		assert_eq!(mint_fn.signature, "mint(address,uint256)");
+		assert!(mint_fn.internal, "Matched condition should have internal: true");
+
+		// Verify matched_on_args contains decoded parameters
+		let matched_on_args = evm_match.matched_on_args.as_ref().unwrap();
+		let functions = matched_on_args.functions.as_ref().unwrap();
+		let mint_args = functions
+			.iter()
+			.find(|f| f.signature.contains("mint"))
+			.unwrap();
+		assert_eq!(mint_args.signature, "mint(address,uint256)");
+
+		let args = mint_args.args.as_ref().unwrap();
+		assert_eq!(args.len(), 2, "mint has 2 parameters");
+
+		// First param: _to (address)
+		assert_eq!(args[0].name, "_to");
+		assert_eq!(args[0].kind, "address");
+		assert_eq!(
+			args[0].value.to_lowercase(),
+			"0xf423d9c1ffeb6386639d024f3b241dab2331b635"
+		);
+
+		// Second param: _amount (uint256) = 5000000
+		assert_eq!(args[1].name, "_amount");
+		assert_eq!(args[1].kind, "uint256");
+		assert_eq!(args[1].value, "5000000");
+
+		// Verify hex_signature is present
+		assert!(mint_args.hex_signature.is_some());
+		assert_eq!(mint_args.hex_signature.as_ref().unwrap(), "0x40c10f19");
+	}
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn test_no_trace_when_no_internal_conditions() -> Result<(), Box<FilterError>> {
+	let test_data = TestDataBuilder::new("evm").build();
+	let filter_service = FilterService::new();
+
+	let trace_called = Arc::new(AtomicBool::new(false));
+	// Pass None for trace_json -- if debug_traceTransaction is called, it will error
+	let mock_transport = setup_mock_transport_for_internal_calls(
+		None,
+		trace_called.clone(),
+	);
+	let client = EvmClient::new_with_transport(mock_transport);
+
+	// Standard function condition (internal: false) -- should NOT trigger trace
+	let mut monitor = test_data.monitor.clone();
+	monitor.match_conditions.events = vec![];
+	monitor.match_conditions.transactions = vec![];
+	monitor.match_conditions.functions = vec![FunctionCondition {
+		signature: "transfer(address,uint256)".to_string(),
+		expression: None,
+		internal: false,
+	}];
+
+	let contract_spec = test_data.contract_spec.unwrap();
+	let contract_with_spec: (String, ContractSpec) = (
+		"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
+		contract_spec.clone(),
+	);
+
+	let _matches = filter_service
+		.filter_block(
+			&client,
+			&test_data.network,
+			&test_data.blocks[0],
+			&[monitor],
+			Some(&[contract_with_spec]),
+		)
+		.await?;
+
+	// debug_traceTransaction should NOT have been called
+	assert!(
+		!trace_called.load(Ordering::SeqCst),
+		"debug_traceTransaction should NOT be called when no internal: true conditions exist"
+	);
+
+	Ok(())
+}
+
+#[tokio::test]
+async fn test_internal_function_matching_with_expression() -> Result<(), Box<FilterError>> {
+	let test_data = TestDataBuilder::new("evm").build();
+	let filter_service = FilterService::new();
+
+	let trace_called = Arc::new(AtomicBool::new(false));
+	let mock_transport = setup_mock_transport_for_internal_calls(
+		Some(build_mint_trace_json()),
+		trace_called.clone(),
+	);
+	let client = EvmClient::new_with_transport(mock_transport);
+
+	// Monitor with expression: _amount > 1000
+	// The trace has _amount = 5000000, so this should match
+	let monitor = make_monitor_with_internal_mint(&test_data.monitor, true);
+
+	// Use the monitor's embedded ABI (which includes mint)
+	let usdc_address = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+	let contract_spec = test_data
+		.monitor
+		.addresses
+		.iter()
+		.find(|a| a.address.to_lowercase() == usdc_address)
+		.expect("USDC address in monitor")
+		.contract_spec
+		.clone()
+		.expect("USDC ABI present");
+	let contract_with_spec: (String, ContractSpec) = (
+		usdc_address.to_string(),
+		contract_spec,
+	);
+
+	let matches = filter_service
+		.filter_block(
+			&client,
+			&test_data.network,
+			&test_data.blocks[0],
+			&[monitor.clone()],
+			Some(&[contract_with_spec.clone()]),
+		)
+		.await?;
+
+	assert!(
+		trace_called.load(Ordering::SeqCst),
+		"debug_traceTransaction should be called"
+	);
+
+	// Find the mint match
+	let has_mint = matches.iter().any(|m| {
+		if let MonitorMatch::EVM(evm) = m {
+			evm.matched_on
+				.functions
+				.iter()
+				.any(|f| f.signature.contains("mint"))
+		} else {
+			false
+		}
+	});
+	assert!(has_mint, "Should match: _amount (5000000) > 1000");
+
+	// Now test with expression that should NOT match: _amount > 10000000
+	let trace_called2 = Arc::new(AtomicBool::new(false));
+	let mock_transport2 = setup_mock_transport_for_internal_calls(
+		Some(build_mint_trace_json()),
+		trace_called2.clone(),
+	);
+	let client2 = EvmClient::new_with_transport(mock_transport2);
+
+	let mut monitor_no_match = monitor.clone();
+	monitor_no_match.match_conditions.functions = vec![FunctionCondition {
+		signature: "mint(address,uint256)".to_string(),
+		expression: Some("_amount > 10000000".to_string()),
+		internal: true,
+	}];
+
+	let matches2 = filter_service
+		.filter_block(
+			&client2,
+			&test_data.network,
+			&test_data.blocks[0],
+			&[monitor_no_match],
+			Some(&[contract_with_spec]),
+		)
+		.await?;
+
+	assert!(
+		trace_called2.load(Ordering::SeqCst),
+		"debug_traceTransaction should still be called"
+	);
+
+	// The expression _amount > 10000000 should NOT match since _amount = 5000000
+	let has_mint2 = matches2.iter().any(|m| {
+		if let MonitorMatch::EVM(evm) = m {
+			evm.matched_on
+				.functions
+				.iter()
+				.any(|f| f.signature.contains("mint"))
+		} else {
+			false
+		}
+	});
+	assert!(
+		!has_mint2,
+		"Should NOT match: _amount (5000000) is not > 10000000"
+	);
 
 	Ok(())
 }

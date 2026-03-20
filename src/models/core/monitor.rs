@@ -147,3 +147,84 @@ pub const SCRIPT_LANGUAGE_EXTENSIONS: &[(&ScriptLanguage, &str)] = &[
 	(&ScriptLanguage::JavaScript, "js"),
 	(&ScriptLanguage::Bash, "sh"),
 ];
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Verify `internal: true` is included in serialized output.
+	#[test]
+	fn test_function_condition_internal_true_serializes() {
+		let condition = FunctionCondition {
+			signature: "mint(address,uint256)".to_string(),
+			expression: None,
+			internal: true,
+		};
+
+		let json = serde_json::to_value(&condition).unwrap();
+		assert_eq!(json["internal"], serde_json::json!(true));
+		assert_eq!(json["signature"], "mint(address,uint256)");
+		assert!(json["expression"].is_null());
+	}
+
+	/// Verify `internal: false` is omitted from serialized output (skip_serializing_if).
+	#[test]
+	fn test_function_condition_internal_false_omitted() {
+		let condition = FunctionCondition {
+			signature: "transfer(address,uint256)".to_string(),
+			expression: Some("value > 0".to_string()),
+			internal: false,
+		};
+
+		let json = serde_json::to_value(&condition).unwrap();
+		assert!(
+			json.get("internal").is_none(),
+			"internal: false should be omitted from serialization"
+		);
+		assert_eq!(json["signature"], "transfer(address,uint256)");
+		assert_eq!(json["expression"], "value > 0");
+	}
+
+	/// Verify deserialization without `internal` field defaults to false.
+	#[test]
+	fn test_function_condition_missing_internal_defaults_false() {
+		let json = serde_json::json!({
+			"signature": "transfer(address,uint256)",
+			"expression": null
+		});
+
+		let condition: FunctionCondition = serde_json::from_value(json).unwrap();
+		assert!(!condition.internal, "missing internal field should default to false");
+	}
+
+	/// Verify roundtrip: internal=true survives serialize -> deserialize.
+	#[test]
+	fn test_function_condition_internal_roundtrip() {
+		let original = FunctionCondition {
+			signature: "mint(address,uint256)".to_string(),
+			expression: Some("_amount > 1000".to_string()),
+			internal: true,
+		};
+
+		let json = serde_json::to_string(&original).unwrap();
+		let deserialized: FunctionCondition = serde_json::from_str(&json).unwrap();
+		assert_eq!(original, deserialized);
+	}
+
+	/// Verify deny_unknown_fields rejects unexpected fields.
+	#[test]
+	fn test_function_condition_rejects_unknown_fields() {
+		let json = serde_json::json!({
+			"signature": "transfer(address,uint256)",
+			"expression": null,
+			"internal": false,
+			"unknown_field": "surprise"
+		});
+
+		let result = serde_json::from_value::<FunctionCondition>(json);
+		assert!(
+			result.is_err(),
+			"deny_unknown_fields should reject unexpected fields"
+		);
+	}
+}
