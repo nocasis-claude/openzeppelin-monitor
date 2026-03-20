@@ -374,6 +374,7 @@ impl<T> StellarBlockFilter<T> {
 							matched_functions.push(FunctionCondition {
 								signature: parsed_operation.function_signature.clone(),
 								expression: None,
+								internal: false,
 							});
 							if let Some(functions) = &mut matched_on_args.functions {
 								functions.push(StellarMatchParamsMap {
@@ -398,6 +399,7 @@ impl<T> StellarBlockFilter<T> {
 														.function_signature
 														.clone(),
 													expression: Some(expr.clone()),
+													internal: false,
 												});
 												if let Some(functions) =
 													&mut matched_on_args.functions
@@ -426,6 +428,7 @@ impl<T> StellarBlockFilter<T> {
 										matched_functions.push(FunctionCondition {
 											signature: parsed_operation.function_signature.clone(),
 											expression: None,
+											internal: false,
 										});
 										if let Some(functions) = &mut matched_on_args.functions {
 											functions.push(StellarMatchParamsMap {
@@ -1591,6 +1594,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "mock_function(I32,String)".to_string(),
 				expression: None,
+				internal: false,
 			}],
 			vec![],
 			vec![AddressWithSpec {
@@ -1666,6 +1670,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "mock_function(I32,String)".to_string(),
 				expression: Some("0 < 50".to_string()),
+				internal: false,
 			}],
 			vec![],
 			vec![AddressWithSpec {
@@ -1741,6 +1746,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "mock_function(i32,string)".to_string(),
 				expression: None,
+				internal: false,
 			}],
 			vec![],
 			vec![AddressWithSpec {
@@ -1815,10 +1821,12 @@ mod tests {
 				FunctionCondition {
 					signature: "wrong_function()".to_string(),
 					expression: None,
+					internal: false,
 				},
 				FunctionCondition {
 					signature: "mock_function(i32,string)".to_string(),
 					expression: None,
+					internal: false,
 				},
 			],
 			vec![],
@@ -1896,6 +1904,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "mock_function(I32,String)".to_string(),
 				expression: None,
+				internal: false,
 			}],
 			vec![],
 			vec![AddressWithSpec {

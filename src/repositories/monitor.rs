@@ -731,6 +731,7 @@ mod tests {
 				functions: vec![FunctionCondition {
 					signature: "transfer".to_string(), // Invalid: missing parentheses
 					expression: None,
+					internal: false,
 				}],
 				events: vec![EventCondition {
 					signature: "Transfer".to_string(), // Invalid: missing parentheses
@@ -764,6 +765,7 @@ mod tests {
 				functions: vec![FunctionCondition {
 					signature: "transfer".to_string(), // Valid for Solana
 					expression: None,
+					internal: false,
 				}],
 				events: vec![EventCondition {
 					signature: "TransferEvent".to_string(), // Valid for Solana
@@ -791,6 +793,7 @@ mod tests {
 				functions: vec![FunctionCondition {
 					signature: "transfer(address,uint256)".to_string(), // Valid
 					expression: None,
+					internal: false,
 				}],
 				events: vec![EventCondition {
 					signature: "Transfer(address,address,uint256)".to_string(), // Valid
@@ -821,6 +824,7 @@ mod tests {
 				functions: vec![FunctionCondition {
 					signature: "transfer".to_string(), // Invalid for EVM, valid for Solana
 					expression: None,
+					internal: false,
 				}],
 				events: vec![],
 				transactions: vec![],

@@ -115,6 +115,7 @@ impl MonitorBuilder {
 		self.match_conditions.functions.push(FunctionCondition {
 			signature: signature.to_string(),
 			expression,
+			internal: false,
 		});
 		self
 	}
@@ -354,6 +355,7 @@ mod tests {
 				functions: vec![FunctionCondition {
 					signature: "transfer(to:address,amount:i128)".to_string(),
 					expression: None,
+					internal: false,
 				}],
 				events: vec![],
 				transactions: vec![],

@@ -118,6 +118,7 @@ proptest! {
 			.map(|i| FunctionCondition {
 				signature: format!("function_{}", i),
 				expression: None,
+				internal: false,
 			})
 			.collect();
 
@@ -179,6 +180,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "transfer".to_string(),
 				expression: Some("amount > 1000000".to_string()),
+				internal: false,
 			}],
 			vec![],
 			vec![],

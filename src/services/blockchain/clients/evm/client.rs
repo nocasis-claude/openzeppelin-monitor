@@ -92,6 +92,19 @@ pub trait EvmClientTrait {
 		to_block: u64,
 		addresses: Option<Vec<String>>,
 	) -> Result<Vec<EVMReceiptLog>, anyhow::Error>;
+
+	/// Traces a transaction's internal calls using debug_traceTransaction
+	/// with the callTracer. Returns the full call tree.
+	///
+	/// # Arguments
+	/// * `transaction_hash` - The hash of the transaction to trace
+	///
+	/// # Returns
+	/// * `Result<CallTrace, anyhow::Error>` - The call trace tree or error
+	async fn debug_trace_transaction(
+		&self,
+		transaction_hash: String,
+	) -> Result<crate::models::CallTrace, anyhow::Error>;
 }
 
 #[async_trait]
@@ -176,6 +189,38 @@ impl<T: Send + Sync + Clone + BlockchainTransport> EvmClientTrait for EvmClient<
 
 		// Parse the response into the expected type
 		Ok(serde_json::from_value(logs_data.clone()).with_context(|| "Failed to parse logs")?)
+	}
+
+	#[instrument(skip(self), fields(transaction_hash))]
+	async fn debug_trace_transaction(
+		&self,
+		transaction_hash: String,
+	) -> Result<crate::models::CallTrace, anyhow::Error> {
+		let params = json!([
+			transaction_hash,
+			{"tracer": "callTracer", "tracerConfig": {"onlyTopCall": false}}
+		])
+		.as_array()
+		.with_context(|| "Failed to create JSON-RPC params array")?
+		.to_vec();
+
+		let response = self
+			.http_client
+			.send_raw_request("debug_traceTransaction", Some(params))
+			.await
+			.with_context(|| {
+				format!(
+					"Failed to trace transaction: {}",
+					transaction_hash
+				)
+			})?;
+
+		let trace_data = response
+			.get("result")
+			.with_context(|| "Missing 'result' field in trace response")?;
+
+		Ok(serde_json::from_value(trace_data.clone())
+			.with_context(|| "Failed to parse call trace")?)
 	}
 }
 

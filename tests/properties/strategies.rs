@@ -244,6 +244,7 @@ pub fn match_conditions_strategy() -> impl Strategy<Value = MatchConditions> {
 		.prop_map(|(signature, expression)| FunctionCondition {
 			signature,
 			expression,
+			internal: false,
 		});
 
 	let event_condition_strategy = (

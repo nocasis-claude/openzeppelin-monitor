@@ -74,6 +74,7 @@ fn make_monitor_with_functions(mut monitor: Monitor, include_expression: bool) -
 			Some("amount >= 2240".to_string())
 		} else {
 			None
+			internal: false,
 		},
 	}];
 	monitor
@@ -858,6 +859,7 @@ async fn test_handle_match_with_no_args() -> Result<(), Box<FilterError>> {
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "increment()".to_string(),
 		expression: None,
+		internal: false,
 	}];
 	monitor.match_conditions.events = vec![];
 	monitor.match_conditions.transactions = vec![];
@@ -983,6 +985,7 @@ async fn test_handle_match_with_key_collision() -> Result<(), Box<FilterError>> 
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "riskyFunction(String signature, I128 amount)".to_string(),
 		expression: None,
+		internal: false,
 	}];
 
 	fn create_test_stellar_transaction() -> StellarTransaction {
@@ -1009,6 +1012,7 @@ async fn test_handle_match_with_key_collision() -> Result<(), Box<FilterError>> 
 			functions: vec![FunctionCondition {
 				signature: "riskyFunction(String signature, I128 amount)".to_string(),
 				expression: None,
+				internal: false,
 			}],
 			events: vec![],
 			transactions: vec![],
@@ -1134,6 +1138,7 @@ async fn test_filter_with_contract_spec() -> Result<(), Box<FilterError>> {
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "increment()".to_string(),
 		expression: None,
+		internal: false,
 	}];
 	monitor.match_conditions.events = vec![];
 	monitor.match_conditions.transactions = vec![];
@@ -1204,6 +1209,7 @@ async fn test_filter_with_invalid_contract_spec() -> Result<(), Box<FilterError>
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "increment()".to_string(),
 		expression: None,
+		internal: false,
 	}];
 	monitor.match_conditions.events = vec![];
 	monitor.match_conditions.transactions = vec![];
@@ -1267,6 +1273,7 @@ async fn test_filter_with_abi_in_config() -> Result<(), Box<FilterError>> {
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "increment()".to_string(),
 		expression: None,
+		internal: false,
 	}];
 	monitor.match_conditions.events = vec![];
 	monitor.match_conditions.transactions = vec![];
@@ -1392,6 +1399,7 @@ async fn test_filter_with_udt_expression() -> Result<(), Box<FilterError>> {
 			"requests contains CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"
 				.to_string(),
 		),
+		internal: false,
 	}];
 	monitor.match_conditions.events = vec![];
 	monitor.match_conditions.transactions = vec![];

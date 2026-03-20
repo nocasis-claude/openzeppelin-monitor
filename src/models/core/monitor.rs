@@ -74,6 +74,12 @@ pub struct FunctionCondition {
 
 	/// Optional expression to filter function parameters
 	pub expression: Option<String>,
+
+	/// When true, match against internal calls via debug_traceTransaction
+	/// instead of only the top-level transaction input.
+	/// Default: false (backward compatible — existing configs unchanged)
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub internal: bool,
 }
 
 /// Condition for matching contract events

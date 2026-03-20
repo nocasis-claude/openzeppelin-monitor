@@ -124,6 +124,7 @@ impl<T> MidnightBlockFilter<T> {
 					matched_functions.push(FunctionCondition {
 						signature: normalized_signature.clone(),
 						expression: condition.expression.clone(),
+						internal: false,
 					});
 
 					// Add the matched arguments if we have any

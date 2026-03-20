@@ -551,6 +551,7 @@ async fn test_handle_match_with_key_collision() -> Result<(), Box<FilterError>> 
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "dangerousFunc(signature: bytes32, value: u64)".to_string(),
 		expression: None,
+		internal: false,
 	}];
 
 	let transaction = create_test_solana_transaction(true, 5000, vec![]);
@@ -573,6 +574,7 @@ async fn test_handle_match_with_key_collision() -> Result<(), Box<FilterError>> 
 			functions: vec![FunctionCondition {
 				signature: "dangerousFunc(signature: bytes32, value: u64)".to_string(),
 				expression: None,
+				internal: false,
 			}],
 			events: vec![],
 			transactions: vec![],

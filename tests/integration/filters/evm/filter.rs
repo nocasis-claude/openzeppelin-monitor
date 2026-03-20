@@ -83,6 +83,7 @@ fn make_monitor_with_functions(mut monitor: Monitor, include_expression: bool) -
 			Some("value > 0".to_string())
 		} else {
 			None
+			internal: false,
 		},
 	});
 	monitor
@@ -115,6 +116,7 @@ fn make_monitor_with_tuples_expression_equality(mut monitor: Monitor) -> Monitor
 			"inputNestedStruct((bool,string,string,uint256,address,string[],(string,uint256)))"
 				.to_string(),
 		expression: Some("nestedStruct == '(true,\"The Book Title\",\"Author Name\",123,\"0x1234567890abcdef1234567890abcdef12345678\",[\"fiction\",\"bestseller\"],(\"The Sequel\",321))'".to_string()),
+		internal: false,
 	});
 	monitor
 }
@@ -623,6 +625,7 @@ async fn test_handle_match_with_no_args() -> Result<(), Box<FilterError>> {
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "increment()".to_string(),
 		expression: None,
+		internal: false,
 	}];
 	monitor.match_conditions.events = vec![];
 	monitor.match_conditions.transactions = vec![];
@@ -731,6 +734,7 @@ async fn test_handle_match_with_key_collision() -> Result<(), Box<FilterError>> 
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "dangerousFunc(bytes32 signature, uint256 value)".to_string(),
 		expression: None,
+		internal: false,
 	}];
 
 	fn create_test_evm_transaction_receipt() -> EVMTransactionReceipt {
@@ -752,6 +756,7 @@ async fn test_handle_match_with_key_collision() -> Result<(), Box<FilterError>> 
 			functions: vec![FunctionCondition {
 				signature: "dangerousFunc(bytes32 signature, uint256 value)".to_string(),
 				expression: None,
+				internal: false,
 			}],
 			events: vec![],
 			transactions: vec![],
@@ -850,6 +855,7 @@ async fn test_filter_block_with_receipt_and_logs() -> Result<(), Box<FilterError
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "transfer(address,uint256)".to_string(),
 		expression: None,
+		internal: false,
 	}];
 	monitor.match_conditions.transactions = vec![TransactionCondition {
 		status: TransactionStatus::Any,
@@ -952,6 +958,7 @@ async fn test_filter_block_with_only_logs() -> Result<(), Box<FilterError>> {
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "transfer(address,uint256)".to_string(),
 		expression: None,
+		internal: false,
 	}];
 	monitor.match_conditions.transactions = vec![]; // This ensures we do not need a receipt
 
@@ -1058,6 +1065,7 @@ async fn test_filter_block_needs_receipt_for_status() -> Result<(), Box<FilterEr
 	monitor.match_conditions.functions = vec![FunctionCondition {
 		signature: "transfer(address,uint256)".to_string(),
 		expression: None,
+		internal: false,
 	}];
 	monitor.match_conditions.transactions = vec![TransactionCondition {
 		status: TransactionStatus::Success, // This is to ensure that the receipt is required
@@ -1154,6 +1162,7 @@ async fn test_filter_block_with_tuples_contains_expression() -> Result<(), Box<F
 			"inputNestedStruct((bool,string,string,uint256,address,string[],(string,uint256)))"
 				.to_string(),
 		expression: Some("nestedStruct contains 'The Book Title'".to_string()),
+		internal: false,
 	}];
 	monitor.match_conditions.transactions = vec![];
 
@@ -1232,6 +1241,7 @@ async fn test_filter_block_with_tuples_expression_equality() -> Result<(), Box<F
 			"inputNestedStruct((bool,string,string,uint256,address,string[],(string,uint256)))"
 				.to_string(),
 		expression: Some("nestedStruct == '(true,\"The Book Title\",\"Author Name\",123,\"0x1234567890abcdef1234567890abcdef12345678\",[\"fiction\",\"bestseller\"],(\"The Sequel\",321))'".to_string()),
+		internal: false,
 	}];
 	monitor.match_conditions.transactions = vec![];
 

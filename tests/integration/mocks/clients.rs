@@ -18,8 +18,8 @@ use super::{
 
 use openzeppelin_monitor::{
 	models::{
-		BlockType, ContractSpec, EVMReceiptLog, EVMTransactionReceipt, MidnightEvent, Network,
-		SolanaTransaction, StellarEvent, StellarTransaction,
+		BlockType, CallTrace, ContractSpec, EVMReceiptLog, EVMTransactionReceipt, MidnightEvent,
+		Network, SolanaTransaction, StellarEvent, StellarTransaction,
 	},
 	services::{
 		blockchain::{
@@ -67,6 +67,11 @@ mock! {
 			to_block: u64,
 			addresses: Option<Vec<String>>,
 		) -> Result<Vec<EVMReceiptLog>,  anyhow::Error>;
+
+		async fn debug_trace_transaction(
+			&self,
+			transaction_hash: String,
+		) -> Result<CallTrace, anyhow::Error>;
 	}
 
 	impl<T: Send + Sync + Clone + 'static> Clone for EvmClientTrait<T> {

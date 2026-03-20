@@ -315,6 +315,7 @@ impl<T> EVMBlockFilter<T> {
 													signature: function_signature_with_params
 														.clone(),
 													expression: Some(expr.to_string()),
+													internal: false,
 												});
 												if let Some(functions) =
 													&mut matched_on_args.functions
@@ -346,6 +347,7 @@ impl<T> EVMBlockFilter<T> {
 										matched_functions.push(FunctionCondition {
 											signature: function_signature_with_params.clone(),
 											expression: None,
+											internal: false,
 										});
 										if let Some(functions) = &mut matched_on_args.functions {
 											functions.push(EVMMatchParamsMap {
@@ -363,6 +365,192 @@ impl<T> EVMBlockFilter<T> {
 						}
 					}
 				}
+			}
+		}
+	}
+
+	/// Finds internal function calls matching monitor conditions by tracing the transaction.
+	///
+	/// Only invoked when the monitor has function conditions with `internal: true`.
+	/// Calls `debug_traceTransaction` with `callTracer` and walks the resulting call tree,
+	/// matching internal calls against monitored addresses and function selectors.
+	pub async fn find_matching_internal_functions<C: EvmClientTrait>(
+		&self,
+		client: &C,
+		contract_specs: &[(String, EVMContractSpec)],
+		transaction: &EVMTransaction,
+		monitor: &Monitor,
+		matched_functions: &mut Vec<FunctionCondition>,
+		matched_on_args: &mut EVMMatchArguments,
+	) {
+		// Only proceed if there are internal function conditions
+		let internal_conditions: Vec<&FunctionCondition> = monitor
+			.match_conditions
+			.functions
+			.iter()
+			.filter(|c| c.internal)
+			.collect();
+
+		if internal_conditions.is_empty() {
+			return;
+		}
+
+		// Get the transaction trace
+		let tx_hash = b256_to_string(transaction.hash);
+		let trace = match client.debug_trace_transaction(tx_hash.clone()).await {
+			Ok(t) => t,
+			Err(e) => {
+				tracing::warn!(
+					"Failed to trace tx {} for internal call matching: {}. Skipping.",
+					tx_hash, e
+				);
+				return;
+			}
+		};
+
+		// Walk the trace tree and match internal calls
+		self.walk_trace_for_internal_calls(
+			&trace,
+			contract_specs,
+			&internal_conditions,
+			monitor,
+			matched_functions,
+			matched_on_args,
+		);
+	}
+
+	/// Recursively walks a call trace tree looking for internal calls that match
+	/// monitored addresses and function selectors.
+	fn walk_trace_for_internal_calls(
+		&self,
+		trace: &crate::models::CallTrace,
+		contract_specs: &[(String, EVMContractSpec)],
+		conditions: &[&FunctionCondition],
+		monitor: &Monitor,
+		matched_functions: &mut Vec<FunctionCondition>,
+		matched_on_args: &mut EVMMatchArguments,
+	) {
+		// Check this call node
+		if let (Some(to), Some(input)) = (&trace.to, &trace.input) {
+			let to_str = h160_to_string(*to);
+
+			// Is the target a monitored address?
+			if let Some(monitored_addr) = monitor.addresses.iter().find(|addr| {
+				are_same_address(&addr.address, &to_str)
+			}) {
+				// Find the ABI for this address
+				if let Some((_, abi)) = contract_specs
+					.iter()
+					.find(|(address, _)| are_same_address(address, &monitored_addr.address))
+				{
+					// Parse ABI
+					let contract =
+						match serde_json::from_slice::<JsonAbi>(abi.to_string().as_bytes()) {
+							Ok(c) => c,
+							Err(_) => return,
+						};
+
+					// Match function selector (first 4 bytes)
+					if input.len() >= 4 {
+						let selector = &input[..4];
+
+						if let Some(function) = contract
+							.functions()
+							.find(|f| f.selector().as_slice() == selector)
+						{
+							let selector_types: Vec<String> = function
+								.inputs
+								.iter()
+								.map(|param| param.selector_type().to_string())
+								.collect();
+
+							let function_signature =
+								format!("{}({})", function.name, selector_types.join(","));
+
+							// Check against internal conditions
+							for condition in conditions {
+								if !are_same_signature(&condition.signature, &function_signature) {
+									continue;
+								}
+
+								// Decode parameters
+								let types: Vec<DynSolType> =
+									match selector_types
+										.iter()
+										.map(|s| s.parse::<DynSolType>())
+										.collect::<Result<Vec<_>, _>>()
+									{
+										Ok(types) => types,
+										Err(_) => continue,
+									};
+
+								let params_blob = input[4..].to_vec();
+								let func_type = DynSolType::Tuple(types.clone());
+								let decoded: Vec<DynSolValue> =
+									match func_type.abi_decode_params(&params_blob) {
+										Ok(DynSolValue::Tuple(vals)) => vals,
+										Ok(val) => vec![val],
+										Err(_) => continue,
+									};
+
+								let params: Vec<EVMMatchParamEntry> = function
+									.inputs
+									.iter()
+									.zip(decoded.iter())
+									.map(|(inp, value)| EVMMatchParamEntry {
+										name: inp.name.clone(),
+										value: format_token_value(value),
+										kind: inp.ty.to_string(),
+										indexed: false,
+									})
+									.collect();
+
+								// Evaluate expression if present
+								let should_match = if let Some(expr) = &condition.expression {
+									match self.evaluate_expression(expr, &params) {
+										Ok(true) => true,
+										_ => false,
+									}
+								} else {
+									true
+								};
+
+								if should_match {
+									matched_functions.push(FunctionCondition {
+										signature: function_signature.clone(),
+										expression: condition.expression.clone(),
+										internal: true,
+									});
+									if let Some(functions) = &mut matched_on_args.functions {
+										functions.push(EVMMatchParamsMap {
+											signature: function_signature.clone(),
+											args: Some(params.clone()),
+											hex_signature: Some(format!(
+												"0x{}",
+												hex::encode(function.selector())
+											)),
+										});
+									}
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Recurse into sub-calls
+		if let Some(sub_calls) = &trace.calls {
+			for sub_call in sub_calls {
+				self.walk_trace_for_internal_calls(
+					sub_call,
+					contract_specs,
+					conditions,
+					monitor,
+					matched_functions,
+					matched_on_args,
+				);
 			}
 		}
 	}
@@ -797,7 +985,7 @@ impl<T: BlockChainClient + EvmClientTrait> BlockFilter for EVMBlockFilter<T> {
 					&mut involved_addresses,
 				);
 
-				// Check function match conditions
+				// Check function match conditions (top-level)
 				self.find_matching_functions_for_transaction(
 					&contract_specs,
 					transaction,
@@ -805,6 +993,17 @@ impl<T: BlockChainClient + EvmClientTrait> BlockFilter for EVMBlockFilter<T> {
 					&mut matched_functions,
 					&mut matched_on_args,
 				);
+
+				// Check internal function match conditions (via debug_traceTransaction)
+				self.find_matching_internal_functions(
+					client,
+					&contract_specs,
+					transaction,
+					monitor,
+					&mut matched_functions,
+					&mut matched_on_args,
+				)
+				.await;
 
 				// Remove duplicates
 				involved_addresses.sort_unstable();
@@ -1673,6 +1872,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "transfer(address,uint256)".to_string(),
 				expression: None,
+				internal: false,
 			}], // functions
 			vec![], // transactions
 			vec![create_test_address(
@@ -1758,6 +1958,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "transfer(address,uint256)".to_string(),
 				expression: Some("amount > 500".to_string()),
+				internal: false,
 			}], // functions
 			vec![], // transactions
 			vec![create_test_address(
@@ -1869,6 +2070,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "transfer(address,uint256)".to_string(),
 				expression: None,
+				internal: false,
 			}],
 			vec![],
 			vec![create_test_address(
@@ -1947,6 +2149,7 @@ mod tests {
 				functions: vec![FunctionCondition {
 					signature: "transfer(address,uint256)".to_string(),
 					expression: None,
+					internal: false,
 				}],
 				events: vec![],
 				transactions: vec![],
@@ -2124,6 +2327,7 @@ mod tests {
 			vec![FunctionCondition {
 				signature: "transfer(address,uint256)".to_string(),
 				expression: None,
+				internal: false,
 			}], // functions
 			vec![], // transactions
 			vec![create_test_address(

@@ -116,6 +116,7 @@ impl MonitorBuilder {
 		self.match_conditions.functions.push(FunctionCondition {
 			signature: signature.to_string(),
 			expression,
+			internal: false,
 		});
 		self
 	}

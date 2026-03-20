@@ -19,7 +19,7 @@ pub use blockchain::{
 };
 
 pub use blockchain::evm::{
-	EVMBaseReceipt, EVMBaseTransaction, EVMBlock, EVMContractSpec, EVMMatchArguments,
+	CallTrace, EVMBaseReceipt, EVMBaseTransaction, EVMBlock, EVMContractSpec, EVMMatchArguments,
 	EVMMatchParamEntry, EVMMatchParamsMap, EVMMonitorConfig, EVMMonitorMatch, EVMReceiptLog,
 	EVMTransaction, EVMTransactionReceipt,
 };

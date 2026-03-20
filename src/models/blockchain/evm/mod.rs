@@ -6,6 +6,7 @@
 mod block;
 mod monitor;
 mod receipt;
+pub mod trace;
 mod transaction;
 
 pub use block::Block as EVMBlock;
@@ -18,4 +19,5 @@ pub use receipt::{
 	BaseLog as EVMReceiptLog, BaseReceipt as EVMBaseReceipt,
 	TransactionReceipt as EVMTransactionReceipt,
 };
+pub use trace::CallTrace;
 pub use transaction::{BaseTransaction as EVMBaseTransaction, Transaction as EVMTransaction};
