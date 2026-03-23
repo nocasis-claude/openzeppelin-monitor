@@ -196,6 +196,11 @@ impl<T: Send + Sync + Clone + BlockchainTransport> EvmClientTrait for EvmClient<
 		&self,
 		transaction_hash: String,
 	) -> Result<crate::models::CallTrace, anyhow::Error> {
+		// Rate limit: debug_traceTransaction is expensive and free RPCs
+		// aggressively throttle it (429). Sleep 500ms between calls to
+		// stay under typical free-tier limits (~2 req/s).
+		tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
 		let params = json!([
 			transaction_hash,
 			{"tracer": "callTracer", "tracerConfig": {"onlyTopCall": false}}

@@ -386,6 +386,7 @@ impl<T> EVMBlockFilter<T> {
 		monitor: &Monitor,
 		matched_functions: &mut Vec<FunctionCondition>,
 		matched_on_args: &mut EVMMatchArguments,
+		trace_cache: &mut std::collections::HashMap<String, Option<crate::models::CallTrace>>,
 	) {
 		// Only proceed if there are internal function conditions
 		let internal_conditions: Vec<&FunctionCondition> = monitor
@@ -399,16 +400,27 @@ impl<T> EVMBlockFilter<T> {
 			return;
 		}
 
-		// Get the transaction trace
+		// Get the transaction trace (cached per tx hash to avoid duplicate RPC calls)
 		let tx_hash = b256_to_string(transaction.hash);
-		let trace = match client.debug_trace_transaction(tx_hash.clone()).await {
-			Ok(t) => t,
-			Err(e) => {
-				tracing::warn!(
-					"Failed to trace tx {} for internal call matching: {}. Skipping.",
-					tx_hash, e
-				);
-				return;
+		let trace = if let Some(cached) = trace_cache.get(&tx_hash) {
+			match cached {
+				Some(t) => t.clone(),
+				None => return, // Previously failed, skip
+			}
+		} else {
+			match client.debug_trace_transaction(tx_hash.clone()).await {
+				Ok(t) => {
+					trace_cache.insert(tx_hash.clone(), Some(t.clone()));
+					t
+				}
+				Err(e) => {
+					trace_cache.insert(tx_hash.clone(), None);
+					tracing::warn!(
+						"Failed to trace tx {} for internal call matching: {}. Skipping.",
+						tx_hash, e
+					);
+					return;
+				}
 			}
 		};
 
@@ -916,6 +928,11 @@ impl<T: BlockChainClient + EvmClientTrait> BlockFilter for EVMBlockFilter<T> {
 
 		tracing::debug!("Processing {} transactions with logs", logs_by_tx.len());
 
+		// Cache debug_traceTransaction results per tx hash (shared across monitors)
+		// Avoids duplicate trace RPC calls when multiple monitors have internal: true
+		let mut trace_cache: std::collections::HashMap<String, Option<crate::models::CallTrace>> =
+			std::collections::HashMap::new();
+
 		for monitor in monitors {
 			tracing::debug!("Processing monitor: {:?}", monitor.name);
 			let monitored_addresses: Vec<String> = monitor
@@ -1010,6 +1027,7 @@ impl<T: BlockChainClient + EvmClientTrait> BlockFilter for EVMBlockFilter<T> {
 					monitor,
 					&mut matched_functions,
 					&mut matched_on_args,
+					&mut trace_cache,
 				)
 				.await;
 
