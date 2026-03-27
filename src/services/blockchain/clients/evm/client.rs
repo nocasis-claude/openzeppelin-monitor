@@ -333,3 +333,212 @@ impl<T: Send + Sync + Clone + BlockchainTransport> BlockChainClient for EvmClien
 			.collect::<Result<Vec<_>, _>>()
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::services::blockchain::transports::{
+		BlockchainTransport, RotatingTransport, TransportError,
+	};
+	use mockall::mock;
+	use reqwest_middleware::ClientWithMiddleware;
+	use serde_json::Value;
+	use std::sync::atomic::{AtomicU32, Ordering};
+	use std::sync::Arc;
+
+	// Mirror the pattern from tests/integration/mocks/transports.rs:
+	// Mock a concrete struct, then manually implement the generic trait.
+	mock! {
+		pub TestTransport {
+			pub async fn send_raw_request(&self, method: &str, params: Option<Vec<Value>>) -> Result<Value, TransportError>;
+			pub async fn get_current_url(&self) -> String;
+		}
+
+		impl Clone for TestTransport {
+			fn clone(&self) -> Self;
+		}
+	}
+
+	#[async_trait]
+	impl BlockchainTransport for MockTestTransport {
+		async fn get_current_url(&self) -> String {
+			self.get_current_url().await
+		}
+
+		async fn send_raw_request<P>(
+			&self,
+			method: &str,
+			params: Option<P>,
+		) -> Result<Value, TransportError>
+		where
+			P: Into<Value> + Send + Clone,
+		{
+			let params_value = params.map(|p| p.into());
+			self.send_raw_request(method, params_value.and_then(|v| v.as_array().cloned()))
+				.await
+		}
+
+		fn update_endpoint_manager_client(
+			&mut self,
+			_: ClientWithMiddleware,
+		) -> Result<(), anyhow::Error> {
+			Ok(())
+		}
+	}
+
+	#[async_trait]
+	impl RotatingTransport for MockTestTransport {
+		async fn try_connect(&self, _url: &str) -> Result<(), anyhow::Error> {
+			Ok(())
+		}
+		async fn update_client(&self, _url: &str) -> Result<(), anyhow::Error> {
+			Ok(())
+		}
+	}
+
+	fn valid_trace_response() -> Value {
+		serde_json::json!({
+			"result": {
+				"type": "CALL",
+				"from": "0x0000000000000000000000000000000000000001",
+				"to": "0x0000000000000000000000000000000000000002",
+				"input": "0x",
+				"output": "0x",
+				"calls": []
+			}
+		})
+	}
+
+	fn error_429() -> TransportError {
+		TransportError::http(
+			reqwest::StatusCode::TOO_MANY_REQUESTS,
+			"http://test".to_string(),
+			"rate limited".to_string(),
+			None,
+			None,
+		)
+	}
+
+	fn error_500() -> TransportError {
+		TransportError::http(
+			reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+			"http://test".to_string(),
+			"server error".to_string(),
+			None,
+			None,
+		)
+	}
+
+	#[tokio::test]
+	async fn test_debug_trace_success_no_retry() {
+		let mut mock = MockTestTransport::new();
+		mock.expect_send_raw_request()
+			.times(1)
+			.returning(|_, _| Ok(valid_trace_response()));
+		mock.expect_clone().returning(|| {
+			let mut m = MockTestTransport::new();
+			m.expect_send_raw_request()
+				.returning(|_, _| Ok(valid_trace_response()));
+			m
+		});
+
+		let client = EvmClient::new_with_transport(mock);
+		let result = client
+			.debug_trace_transaction("0xabc".to_string())
+			.await;
+
+		assert!(result.is_ok());
+		let trace = result.unwrap();
+		assert_eq!(trace.call_type, "CALL");
+	}
+
+	#[tokio::test]
+	async fn test_debug_trace_429_then_success() {
+		let call_count = Arc::new(AtomicU32::new(0));
+		let call_count_clone = call_count.clone();
+
+		let mut mock = MockTestTransport::new();
+		mock.expect_send_raw_request()
+			.times(2)
+			.returning(move |_, _| {
+				let n = call_count_clone.fetch_add(1, Ordering::SeqCst);
+				if n == 0 {
+					Err(error_429())
+				} else {
+					Ok(valid_trace_response())
+				}
+			});
+		mock.expect_clone().returning(|| {
+			let mut m = MockTestTransport::new();
+			m.expect_send_raw_request()
+				.returning(|_, _| Ok(valid_trace_response()));
+			m
+		});
+
+		let client = EvmClient::new_with_transport(mock);
+		let result = client
+			.debug_trace_transaction("0xabc".to_string())
+			.await;
+
+		assert!(result.is_ok());
+		assert_eq!(call_count.load(Ordering::SeqCst), 2);
+	}
+
+	#[tokio::test]
+	async fn test_debug_trace_429_exhausts_retries() {
+		let call_count = Arc::new(AtomicU32::new(0));
+		let call_count_clone = call_count.clone();
+
+		let mut mock = MockTestTransport::new();
+		mock.expect_send_raw_request()
+			.times(4) // 1 initial + 3 retries
+			.returning(move |_, _| {
+				call_count_clone.fetch_add(1, Ordering::SeqCst);
+				Err(error_429())
+			});
+		mock.expect_clone().returning(|| {
+			let mut m = MockTestTransport::new();
+			m.expect_send_raw_request()
+				.returning(|_, _| Err(error_429()));
+			m
+		});
+
+		let client = EvmClient::new_with_transport(mock);
+		let result = client
+			.debug_trace_transaction("0xabc".to_string())
+			.await;
+
+		assert!(result.is_err());
+		assert_eq!(call_count.load(Ordering::SeqCst), 4);
+		let err_msg = format!("{}", result.unwrap_err());
+		assert!(err_msg.contains("429") || err_msg.contains("trace transaction"));
+	}
+
+	#[tokio::test]
+	async fn test_debug_trace_non_429_error_no_retry() {
+		let call_count = Arc::new(AtomicU32::new(0));
+		let call_count_clone = call_count.clone();
+
+		let mut mock = MockTestTransport::new();
+		mock.expect_send_raw_request()
+			.times(1)
+			.returning(move |_, _| {
+				call_count_clone.fetch_add(1, Ordering::SeqCst);
+				Err(error_500())
+			});
+		mock.expect_clone().returning(|| {
+			let mut m = MockTestTransport::new();
+			m.expect_send_raw_request()
+				.returning(|_, _| Err(error_500()));
+			m
+		});
+
+		let client = EvmClient::new_with_transport(mock);
+		let result = client
+			.debug_trace_transaction("0xabc".to_string())
+			.await;
+
+		assert!(result.is_err());
+		assert_eq!(call_count.load(Ordering::SeqCst), 1); // No retry
+	}
+}
