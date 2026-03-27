@@ -218,7 +218,7 @@ impl<T: Send + Sync + Clone + BlockchainTransport> EvmClientTrait for EvmClient<
 					.copied()
 					.unwrap_or(1000);
 				tracing::warn!(
-					"debug_traceTransaction for {} rate-limited, retry {}/{} after {}ms",
+					"debug_traceTransaction for {} failed (retryable), retry {}/{} after {}ms",
 					transaction_hash,
 					attempt,
 					MAX_RETRIES,
@@ -244,13 +244,13 @@ impl<T: Send + Sync + Clone + BlockchainTransport> EvmClientTrait for EvmClient<
 						.with_context(|| "Failed to parse call trace")?);
 				}
 				Err(e) => {
-					let is_rate_limit = matches!(
+					let is_retryable = matches!(
 						&e,
 						TransportError::Http { status_code, .. }
-							if status_code.as_u16() == 429
+							if matches!(status_code.as_u16(), 429 | 404 | 500 | 502 | 503 | 504)
 					);
 
-					if is_rate_limit && attempt < MAX_RETRIES {
+					if is_retryable && attempt < MAX_RETRIES {
 						continue;
 					}
 
@@ -515,7 +515,45 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_debug_trace_non_429_error_no_retry() {
+	async fn test_debug_trace_502_then_success() {
+		let call_count = Arc::new(AtomicU32::new(0));
+		let call_count_clone = call_count.clone();
+
+		let mut mock = MockTestTransport::new();
+		mock.expect_send_raw_request()
+			.times(2)
+			.returning(move |_, _| {
+				let n = call_count_clone.fetch_add(1, Ordering::SeqCst);
+				if n == 0 {
+					Err(TransportError::http(
+						reqwest::StatusCode::BAD_GATEWAY,
+						"http://test".to_string(),
+						"bad gateway".to_string(),
+						None,
+						None,
+					))
+				} else {
+					Ok(valid_trace_response())
+				}
+			});
+		mock.expect_clone().returning(|| {
+			let mut m = MockTestTransport::new();
+			m.expect_send_raw_request()
+				.returning(|_, _| Ok(valid_trace_response()));
+			m
+		});
+
+		let client = EvmClient::new_with_transport(mock);
+		let result = client
+			.debug_trace_transaction("0xabc".to_string())
+			.await;
+
+		assert!(result.is_ok());
+		assert_eq!(call_count.load(Ordering::SeqCst), 2); // Retried once
+	}
+
+	#[tokio::test]
+	async fn test_debug_trace_non_retryable_error_no_retry() {
 		let call_count = Arc::new(AtomicU32::new(0));
 		let call_count_clone = call_count.clone();
 
@@ -524,7 +562,13 @@ mod tests {
 			.times(1)
 			.returning(move |_, _| {
 				call_count_clone.fetch_add(1, Ordering::SeqCst);
-				Err(error_500())
+				Err(TransportError::http(
+					reqwest::StatusCode::FORBIDDEN, // 403 — not retryable
+					"http://test".to_string(),
+					"forbidden".to_string(),
+					None,
+					None,
+				))
 			});
 		mock.expect_clone().returning(|| {
 			let mut m = MockTestTransport::new();
@@ -539,6 +583,6 @@ mod tests {
 			.await;
 
 		assert!(result.is_err());
-		assert_eq!(call_count.load(Ordering::SeqCst), 1); // No retry
+		assert_eq!(call_count.load(Ordering::SeqCst), 1); // No retry on 403
 	}
 }
