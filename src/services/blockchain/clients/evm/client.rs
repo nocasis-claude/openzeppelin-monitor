@@ -17,7 +17,7 @@ use crate::{
 	services::{
 		blockchain::{
 			client::BlockChainClient,
-			transports::{BlockchainTransport, EVMTransportClient},
+			transports::{BlockchainTransport, EVMTransportClient, TransportError},
 			BlockFilterFactory,
 		},
 		filter::{evm_helpers::string_to_h256, EVMBlockFilter},
@@ -196,11 +196,6 @@ impl<T: Send + Sync + Clone + BlockchainTransport> EvmClientTrait for EvmClient<
 		&self,
 		transaction_hash: String,
 	) -> Result<crate::models::CallTrace, anyhow::Error> {
-		// Rate limit: debug_traceTransaction is expensive and free RPCs
-		// aggressively throttle it (429). Sleep 100ms between calls to
-		// stay under typical free-tier limits (~10 req/s).
-		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
 		let params = json!([
 			transaction_hash,
 			{"tracer": "callTracer", "tracerConfig": {"onlyTopCall": false}}
@@ -209,23 +204,64 @@ impl<T: Send + Sync + Clone + BlockchainTransport> EvmClientTrait for EvmClient<
 		.with_context(|| "Failed to create JSON-RPC params array")?
 		.to_vec();
 
-		let response = self
-			.http_client
-			.send_raw_request("debug_traceTransaction", Some(params))
-			.await
-			.with_context(|| {
-				format!(
-					"Failed to trace transaction: {}",
-					transaction_hash
+		// Retry with exponential backoff on 429 (rate limit).
+		// The endpoint_manager handles rotation for multi-endpoint configs,
+		// but with a single endpoint it returns the 429 error immediately.
+		// We retry here to handle both cases without modifying upstream code.
+		const MAX_RETRIES: u32 = 3;
+		const BACKOFF_MS: [u64; 3] = [200, 500, 1000];
+
+		for attempt in 0..=MAX_RETRIES {
+			if attempt > 0 {
+				let delay = BACKOFF_MS
+					.get((attempt - 1) as usize)
+					.copied()
+					.unwrap_or(1000);
+				tracing::warn!(
+					"debug_traceTransaction for {} rate-limited, retry {}/{} after {}ms",
+					transaction_hash,
+					attempt,
+					MAX_RETRIES,
+					delay,
+				);
+				tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+			}
+
+			match self
+				.http_client
+				.send_raw_request(
+					"debug_traceTransaction",
+					Some(serde_json::Value::Array(params.clone())),
 				)
-			})?;
+				.await
+			{
+				Ok(response) => {
+					let trace_data = response
+						.get("result")
+						.with_context(|| "Missing 'result' field in trace response")?;
 
-		let trace_data = response
-			.get("result")
-			.with_context(|| "Missing 'result' field in trace response")?;
+					return Ok(serde_json::from_value(trace_data.clone())
+						.with_context(|| "Failed to parse call trace")?);
+				}
+				Err(e) => {
+					let is_rate_limit = matches!(
+						&e,
+						TransportError::Http { status_code, .. }
+							if status_code.as_u16() == 429
+					);
 
-		Ok(serde_json::from_value(trace_data.clone())
-			.with_context(|| "Failed to parse call trace")?)
+					if is_rate_limit && attempt < MAX_RETRIES {
+						continue;
+					}
+
+					return Err(e).with_context(|| {
+						format!("Failed to trace transaction: {}", transaction_hash)
+					});
+				}
+			}
+		}
+
+		unreachable!("loop always returns")
 	}
 }
 
