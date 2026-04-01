@@ -1700,3 +1700,59 @@ async fn test_internal_function_matching_with_expression() -> Result<(), Box<Fil
 
 	Ok(())
 }
+
+/// Verifies that a monitor with only event conditions (no function conditions)
+/// does NOT call debug_traceTransaction, even if internal calls exist in the
+/// block's transactions.
+///
+/// This is the expected behavior for L2 system contract monitors (e.g.,
+/// ContractDeployer, L2BaseToken) which watch for events only. Adding
+/// `internal: true` to a function condition triggers tracing, but having
+/// no function conditions at all means tracing is skipped entirely.
+#[tokio::test]
+async fn test_no_trace_when_only_event_conditions() -> Result<(), Box<FilterError>> {
+	let test_data = TestDataBuilder::new("evm").build();
+	let filter_service = FilterService::new();
+
+	let trace_called = Arc::new(AtomicBool::new(false));
+	// Pass None for trace -- if debug_traceTransaction is called, it will error
+	let mock_transport = setup_mock_transport_for_internal_calls(
+		None,
+		trace_called.clone(),
+	);
+	let client = EvmClient::new_with_transport(mock_transport);
+
+	// Monitor with ONLY event conditions, no function conditions at all.
+	// This simulates L2 system contract monitors like ForceUpgrade or
+	// EOA Collision which match on ContractDeployed events.
+	let mut monitor = test_data.monitor.clone();
+	monitor.match_conditions.functions = vec![];
+	monitor.match_conditions.transactions = vec![];
+	// Keep events from the default monitor fixture
+
+	let contract_spec = test_data.contract_spec.unwrap();
+	let contract_with_spec: (String, ContractSpec) = (
+		"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
+		contract_spec,
+	);
+
+	let _matches = filter_service
+		.filter_block(
+			&client,
+			&test_data.network,
+			&test_data.blocks[0],
+			&[monitor],
+			Some(&[contract_with_spec]),
+		)
+		.await?;
+
+	// debug_traceTransaction should NOT be called -- there are no function
+	// conditions (internal or otherwise), so the trace code path is never entered.
+	assert!(
+		!trace_called.load(Ordering::SeqCst),
+		"debug_traceTransaction should NOT be called when monitor has only event conditions \
+		and no function conditions. Event matching does not require tracing."
+	);
+
+	Ok(())
+}
