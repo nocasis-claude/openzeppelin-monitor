@@ -826,6 +826,7 @@ async fn test_handle_match_with_duplicate_event_signatures() -> Result<(), Box<F
 			functions: vec![FunctionCondition {
 				signature: "main()".to_string(),
 				expression: None,
+				internal: false,
 			}],
 			events: vec![
 				EventCondition {
