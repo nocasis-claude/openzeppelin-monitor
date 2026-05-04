@@ -384,6 +384,7 @@ impl<T> EVMBlockFilter<T> {
 		contract_specs: &[(String, EVMContractSpec)],
 		transaction: &EVMTransaction,
 		logs: &[EVMReceiptLog],
+		normalized_monitored: &std::collections::HashSet<String>,
 		monitor: &Monitor,
 		matched_functions: &mut Vec<FunctionCondition>,
 		matched_on_args: &mut EVMMatchArguments,
@@ -417,15 +418,11 @@ impl<T> EVMBlockFilter<T> {
 		// Trade-off: this skips an internal call to a monitored address where the
 		// function executes but emits no event (and tx.to/tx.from don't match).
 		// This is unusual for security-relevant operations — standard contracts
-		// emit events on state changes. The trade-off is documented in the OZ
-		// Monitor fork's deployment notes.
+		// emit events on state changes.
+		//
+		// `normalized_monitored` is built once per monitor by the caller and reused
+		// across every transaction in the block.
 		let touches_monitored = {
-			let normalized_monitored: std::collections::HashSet<String> = monitor
-				.addresses
-				.iter()
-				.map(|a| normalize_address(&a.address))
-				.collect();
-
 			let tx_to_match = transaction
 				.to
 				.map(|t| normalized_monitored.contains(&normalize_address(&h160_to_string(t))))
@@ -993,6 +990,13 @@ impl<T: BlockChainClient + EvmClientTrait> BlockFilter for EVMBlockFilter<T> {
 				.map(|a| a.address.clone())
 				.collect();
 
+			// Pre-compute normalized monitored addresses once per monitor for the
+			// internal-call pre-filter (used inside the per-tx loop below).
+			let normalized_monitored: std::collections::HashSet<String> = monitored_addresses
+				.iter()
+				.map(|a| normalize_address(a))
+				.collect();
+
 			// Check if this monitor needs a receipt
 			let should_fetch_receipt = self.needs_receipt(monitor, &all_block_logs);
 
@@ -1072,13 +1076,16 @@ impl<T: BlockChainClient + EvmClientTrait> BlockFilter for EVMBlockFilter<T> {
 				);
 
 				// Check internal function match conditions (via debug_traceTransaction).
-				// `logs` is passed for the pre-filter check that skips the trace RPC
-				// when no monitored address is reachable in this transaction.
+				// `logs` and `normalized_monitored` are passed for the pre-filter check
+				// that skips the trace RPC when no monitored address is reachable in
+				// this transaction. The HashSet is built once per monitor (outside the
+				// per-tx loop) to avoid rebuilding it for every transaction.
 				self.find_matching_internal_functions(
 					client,
 					&contract_specs,
 					transaction,
 					logs,
+					&normalized_monitored,
 					monitor,
 					&mut matched_functions,
 					&mut matched_on_args,

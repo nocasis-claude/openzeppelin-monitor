@@ -2153,3 +2153,84 @@ async fn test_pre_filter_passes_when_log_emitter_is_monitored(
 
 	Ok(())
 }
+
+/// Pre-filter passthrough: when the monitored address is the transaction
+/// sender (tx.from) — e.g., monitoring an EOA / multisig that calls into
+/// other contracts — the binary must still call debug_traceTransaction.
+#[tokio::test]
+async fn test_pre_filter_passes_when_tx_from_is_monitored(
+) -> Result<(), Box<FilterError>> {
+	let test_data = TestDataBuilder::new("evm").build();
+	let filter_service = FilterService::new();
+
+	let trace_called = Arc::new(AtomicBool::new(false));
+
+	// Block[0] tx[0].from = 0x8654155e325ef0778428e7c0ddd1559efbc20523.
+	// Watch this EOA as the "monitored address" — tx.to (0x80a6...) does
+	// not match, no logs emitted by it, but tx.from does.
+	let monitored_sender = "0x8654155e325ef0778428e7c0ddd1559efbc20523";
+
+	// Return any non-empty trace; we only assert that the trace RPC was made,
+	// not that the match succeeds.
+	let trivial_trace = json!({
+		"type": "CALL",
+		"from": monitored_sender,
+		"to": "0x80a64c6d7f12c47b7c66c5b4e20e72bc1fcd5d9e",
+		"gas": "0x30000",
+		"gasUsed": "0x10000",
+		"input": "0xdeadbeef",
+		"output": "0x"
+	});
+
+	// Default helper returns empty eth_getLogs — that's what we want here:
+	// no log emitter match, only tx.from match should trigger the passthrough.
+	let mock_transport = setup_mock_transport_for_internal_calls(
+		Some(trivial_trace),
+		trace_called.clone(),
+	);
+	let client = EvmClient::new_with_transport(mock_transport);
+
+	let usdc_spec = test_data
+		.monitor
+		.addresses
+		.iter()
+		.find(|a| a.address.to_lowercase() == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+		.expect("USDC address in monitor")
+		.contract_spec
+		.clone()
+		.expect("USDC ABI present");
+
+	let mut monitor = test_data.monitor.clone();
+	monitor.addresses = vec![AddressWithSpec {
+		address: monitored_sender.to_string(),
+		contract_spec: Some(usdc_spec.clone()),
+	}];
+	monitor.match_conditions.events = vec![];
+	monitor.match_conditions.transactions = vec![];
+	monitor.match_conditions.functions = vec![FunctionCondition {
+		signature: "mint(address,uint256)".to_string(),
+		expression: None,
+		internal: true,
+	}];
+
+	let contract_with_spec: (String, ContractSpec) =
+		(monitored_sender.to_string(), usdc_spec);
+
+	let _matches = filter_service
+		.filter_block(
+			&client,
+			&test_data.network,
+			&test_data.blocks[0],
+			&[monitor],
+			Some(&[contract_with_spec]),
+		)
+		.await?;
+
+	assert!(
+		trace_called.load(Ordering::SeqCst),
+		"debug_traceTransaction must be called when the monitored address \
+		 is the tx.from sender, even if tx.to and log emitters do not match."
+	);
+
+	Ok(())
+}
