@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use openzeppelin_monitor::{
 	models::{
-		BlockType, ContractSpec, EVMReceiptLog, EVMTransactionReceipt, EventCondition,
-		FunctionCondition, Monitor, MonitorMatch, TransactionCondition, TransactionStatus,
+		AddressWithSpec, BlockType, ContractSpec, EVMReceiptLog, EVMTransactionReceipt,
+		EventCondition, FunctionCondition, Monitor, MonitorMatch, TransactionCondition,
+		TransactionStatus,
 	},
 	services::{
 		blockchain::{EvmClient, TransportError},
@@ -920,6 +921,8 @@ async fn test_handle_match_with_duplicate_event_signatures() -> Result<(), Box<F
 						},
 					]),
 					hex_signature: None,
+					caller: None,
+					target: None,
 				},
 				EVMMatchParamsMap {
 					signature: "Transfer(address,address,uint256)".to_string(),
@@ -944,6 +947,8 @@ async fn test_handle_match_with_duplicate_event_signatures() -> Result<(), Box<F
 						},
 					]),
 					hex_signature: None,
+					caller: None,
+					target: None,
 				},
 			]),
 		}),
@@ -1909,6 +1914,241 @@ async fn test_no_trace_when_only_event_conditions() -> Result<(), Box<FilterErro
 		!trace_called.load(Ordering::SeqCst),
 		"debug_traceTransaction should NOT be called when monitor has only event conditions \
 		and no function conditions. Event matching does not require tracing."
+	);
+
+	Ok(())
+}
+
+// ============================================================================
+// Pre-filter tests: skip debug_traceTransaction when tx is not reachable
+// from a monitored address (tx.to / tx.from / log emitter).
+// ============================================================================
+
+/// Mock transport variant that lets the test supply custom eth_getLogs
+/// responses (the default helper returns an empty array). The mock returns
+/// `logs_response` for every eth_getLogs call regardless of params -- callers
+/// shape the value to drive the pre-filter behavior they want to exercise.
+fn setup_mock_transport_for_internal_calls_with_logs(
+	trace_json: Option<serde_json::Value>,
+	logs_response: serde_json::Value,
+	trace_called: Arc<AtomicBool>,
+) -> MockEVMTransportClient {
+	let mut mock_transport = MockEVMTransportClient::new();
+
+	mock_transport
+		.expect_send_raw_request()
+		.returning(move |method, _params| match method {
+			"net_version" => Ok(json!({"result": "1"})),
+			"eth_getLogs" => Ok(json!({"result": logs_response.clone()})),
+			"debug_traceTransaction" => {
+				trace_called.store(true, Ordering::SeqCst);
+				match &trace_json {
+					Some(trace) => Ok(json!({"result": trace})),
+					None => Err(TransportError::http(
+						reqwest::StatusCode::METHOD_NOT_ALLOWED,
+						"random.url".to_string(),
+						"debug_traceTransaction not expected".to_string(),
+						None,
+						None,
+					)),
+				}
+			}
+			_ => Err(TransportError::http(
+				reqwest::StatusCode::METHOD_NOT_ALLOWED,
+				"random.url".to_string(),
+				format!("Unexpected method: {}", method),
+				None,
+				None,
+			)),
+		});
+
+	mock_transport
+}
+
+/// Pre-filter: when a monitor with `internal: true` watches an address that is
+/// not in any tx.to, tx.from, or log emitter in the block, the binary must
+/// skip debug_traceTransaction entirely. This is the optimization that lets
+/// us run rate-limited free RPCs (e.g., Abstract) without 429 storms.
+#[tokio::test]
+async fn test_pre_filter_skips_when_no_monitored_address_touched(
+) -> Result<(), Box<FilterError>> {
+	let test_data = TestDataBuilder::new("evm").build();
+	let filter_service = FilterService::new();
+
+	let trace_called = Arc::new(AtomicBool::new(false));
+	// trace_json = None => any call to debug_traceTransaction errors the test.
+	let mock_transport = setup_mock_transport_for_internal_calls(None, trace_called.clone());
+	let client = EvmClient::new_with_transport(mock_transport);
+
+	// Build a monitor with internal: true, but watching an address that
+	// does NOT appear in block[0]'s tx.to / tx.from / logs.
+	// Block[0] tx targets: 0x80a6..., 0xa0b8... (USDC), 0xf245...
+	let unmonitored_address = "0x9999999999999999999999999999999999999999";
+
+	// Take the USDC contract spec from the fixture so the function-condition
+	// mint() signature still resolves to a known ABI.
+	let usdc_spec = test_data
+		.monitor
+		.addresses
+		.iter()
+		.find(|a| a.address.to_lowercase() == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+		.expect("USDC address in monitor")
+		.contract_spec
+		.clone()
+		.expect("USDC ABI present");
+
+	let mut monitor = test_data.monitor.clone();
+	monitor.addresses = vec![AddressWithSpec {
+		address: unmonitored_address.to_string(),
+		contract_spec: Some(usdc_spec.clone()),
+	}];
+	monitor.match_conditions.events = vec![];
+	monitor.match_conditions.transactions = vec![];
+	monitor.match_conditions.functions = vec![FunctionCondition {
+		signature: "mint(address,uint256)".to_string(),
+		expression: None,
+		internal: true,
+	}];
+
+	let contract_with_spec: (String, ContractSpec) =
+		(unmonitored_address.to_string(), usdc_spec);
+
+	let _matches = filter_service
+		.filter_block(
+			&client,
+			&test_data.network,
+			&test_data.blocks[0],
+			&[monitor],
+			Some(&[contract_with_spec]),
+		)
+		.await?;
+
+	assert!(
+		!trace_called.load(Ordering::SeqCst),
+		"debug_traceTransaction must be skipped when no tx in the block touches \
+		 the monitored address (tx.to / tx.from / log emitter)."
+	);
+
+	Ok(())
+}
+
+/// Pre-filter passthrough: when tx.to does NOT match a monitored address,
+/// but a log emitter in that tx's receipt DOES, the binary must still call
+/// debug_traceTransaction. This covers the common case of a contract calling
+/// mint() on a monitored token from an intermediary -- tx.to is the router,
+/// log.address is the token. (E.g., ZKToken mint via governor.)
+#[tokio::test]
+async fn test_pre_filter_passes_when_log_emitter_is_monitored(
+) -> Result<(), Box<FilterError>> {
+	let test_data = TestDataBuilder::new("evm").build();
+	let filter_service = FilterService::new();
+
+	let trace_called = Arc::new(AtomicBool::new(false));
+
+	// Monitor an address that is NOT any tx.to in block[0]. Block[0] tx
+	// targets: 0x80a6..., 0xa0b8..., 0xf245...
+	// We'll watch USDC (0xa0b8...) but route the test such that we use a
+	// different monitored address that only appears as a log emitter.
+	// Use 0x8888...8888 as the monitored address.
+	let monitored_via_log = "0x8888888888888888888888888888888888888888";
+
+	// Build an eth_getLogs response that has a log emitted by `monitored_via_log`
+	// for the first tx hash in block[0]. Topic[0] is irrelevant for the
+	// pre-filter -- it only checks `log.address`.
+	// Block[0] first tx hash: 0xa39d1b9b3edda74414bd6ffaf6596f8ea12cf0012fd9a930f71ed69df6ff34d0
+	let first_tx_hash =
+		"0xa39d1b9b3edda74414bd6ffaf6596f8ea12cf0012fd9a930f71ed69df6ff34d0";
+	let logs_response = json!([
+		{
+			"address": monitored_via_log,
+			"topics": [
+				"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+			],
+			"data": "0x",
+			"blockNumber": "0x1451aca",
+			"transactionHash": first_tx_hash,
+			"transactionIndex": "0x0",
+			"blockHash": "0x9432868b7fc57e85f0435ca3047f6a76add86f804b3c1af85647520061e30f80",
+			"logIndex": "0x0",
+			"removed": false
+		}
+	]);
+
+	// Build a mint trace targeting `monitored_via_log` so the pre-filter sees
+	// the log emitter match AND the trace itself decodes a mint() call to
+	// the monitored address. (find_matching_internal_functions still needs
+	// a trace where to == monitored address to actually report a match.)
+	let mint_input = "0x40c10f19\
+		000000000000000000000000f423d9c1ffeb6386639d024f3b241dab2331b635\
+		00000000000000000000000000000000000000000000000000000000004c4b40";
+	let trace_to_monitored = json!({
+		"type": "CALL",
+		"from": "0x8654155e325ef0778428e7c0ddd1559efbc20523",
+		"to": "0x80a64c6d7f12c47b7c66c5b4e20e72bc1fcd5d9e",
+		"gas": "0x30000",
+		"gasUsed": "0x10000",
+		"input": "0xdeadbeef",
+		"output": "0x",
+		"calls": [
+			{
+				"type": "CALL",
+				"from": "0x80a64c6d7f12c47b7c66c5b4e20e72bc1fcd5d9e",
+				"to": monitored_via_log,
+				"gas": "0x10000",
+				"gasUsed": "0x4000",
+				"input": mint_input,
+				"output": "0x0000000000000000000000000000000000000000000000000000000000000001"
+			}
+		]
+	});
+
+	let mock_transport = setup_mock_transport_for_internal_calls_with_logs(
+		Some(trace_to_monitored),
+		logs_response,
+		trace_called.clone(),
+	);
+	let client = EvmClient::new_with_transport(mock_transport);
+
+	let usdc_spec = test_data
+		.monitor
+		.addresses
+		.iter()
+		.find(|a| a.address.to_lowercase() == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+		.expect("USDC address in monitor")
+		.contract_spec
+		.clone()
+		.expect("USDC ABI present");
+
+	let mut monitor = test_data.monitor.clone();
+	monitor.addresses = vec![AddressWithSpec {
+		address: monitored_via_log.to_string(),
+		contract_spec: Some(usdc_spec.clone()),
+	}];
+	monitor.match_conditions.events = vec![];
+	monitor.match_conditions.transactions = vec![];
+	monitor.match_conditions.functions = vec![FunctionCondition {
+		signature: "mint(address,uint256)".to_string(),
+		expression: None,
+		internal: true,
+	}];
+
+	let contract_with_spec: (String, ContractSpec) =
+		(monitored_via_log.to_string(), usdc_spec);
+
+	let _matches = filter_service
+		.filter_block(
+			&client,
+			&test_data.network,
+			&test_data.blocks[0],
+			&[monitor],
+			Some(&[contract_with_spec]),
+		)
+		.await?;
+
+	assert!(
+		trace_called.load(Ordering::SeqCst),
+		"debug_traceTransaction must be called when the monitored address appears \
+		 as a log emitter, even if tx.to does not match."
 	);
 
 	Ok(())

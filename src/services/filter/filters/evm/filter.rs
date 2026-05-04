@@ -383,6 +383,7 @@ impl<T> EVMBlockFilter<T> {
 		client: &C,
 		contract_specs: &[(String, EVMContractSpec)],
 		transaction: &EVMTransaction,
+		logs: &[EVMReceiptLog],
 		monitor: &Monitor,
 		matched_functions: &mut Vec<FunctionCondition>,
 		matched_on_args: &mut EVMMatchArguments,
@@ -397,6 +398,57 @@ impl<T> EVMBlockFilter<T> {
 			.collect();
 
 		if internal_conditions.is_empty() {
+			return;
+		}
+
+		// Pre-filter: skip the trace RPC call unless this transaction is reachable
+		// from a monitored address. A transaction is "reachable" if any of:
+		//   - tx.to matches a monitored address (direct call)
+		//   - tx.from matches a monitored address (rare, but cheap to check)
+		//   - any log emitter matches a monitored address (the function emitted an
+		//     event from a monitored contract — the most common case for internal
+		//     calls that we care about)
+		//
+		// Without this guard, the binary would call debug_traceTransaction for every
+		// transaction in every block when ANY monitor has internal:true conditions.
+		// On high-TPS chains with rate-limited RPCs (e.g., free public endpoints),
+		// this overwhelms quotas and causes 429s.
+		//
+		// Trade-off: this skips an internal call to a monitored address where the
+		// function executes but emits no event (and tx.to/tx.from don't match).
+		// This is unusual for security-relevant operations — standard contracts
+		// emit events on state changes. The trade-off is documented in the OZ
+		// Monitor fork's deployment notes.
+		let touches_monitored = {
+			let normalized_monitored: std::collections::HashSet<String> = monitor
+				.addresses
+				.iter()
+				.map(|a| normalize_address(&a.address))
+				.collect();
+
+			let tx_to_match = transaction
+				.to
+				.map(|t| normalized_monitored.contains(&normalize_address(&h160_to_string(t))))
+				.unwrap_or(false);
+
+			let tx_from_match = transaction
+				.from
+				.map(|f| normalized_monitored.contains(&normalize_address(&h160_to_string(f))))
+				.unwrap_or(false);
+
+			let log_match = logs.iter().any(|log| {
+				normalized_monitored.contains(&normalize_address(&h160_to_string(log.address)))
+			});
+
+			tx_to_match || tx_from_match || log_match
+		};
+
+		if !touches_monitored {
+			tracing::trace!(
+				"Skipping debug_traceTransaction for tx {}: no monitored address \
+				 in tx.to, tx.from, or receipt logs",
+				b256_to_string(transaction.hash)
+			);
 			return;
 		}
 
@@ -1019,11 +1071,14 @@ impl<T: BlockChainClient + EvmClientTrait> BlockFilter for EVMBlockFilter<T> {
 					&mut matched_on_args,
 				);
 
-				// Check internal function match conditions (via debug_traceTransaction)
+				// Check internal function match conditions (via debug_traceTransaction).
+				// `logs` is passed for the pre-filter check that skips the trace RPC
+				// when no monitored address is reachable in this transaction.
 				self.find_matching_internal_functions(
 					client,
 					&contract_specs,
 					transaction,
+					logs,
 					monitor,
 					&mut matched_functions,
 					&mut matched_on_args,
